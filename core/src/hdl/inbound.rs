@@ -1160,6 +1160,7 @@ impl InboundRequest {
         let transfer = PayloadTransferFrame {
             packet_type: Some(PacketType::Data.into()),
             payload_chunk: Some(PayloadChunk {
+                index: None,
                 offset: Some(0),
                 flags: Some(0),
                 body: Some(frame_data),
@@ -1186,6 +1187,7 @@ impl InboundRequest {
         let transfer = PayloadTransferFrame {
             packet_type: Some(PacketType::Data.into()),
             payload_chunk: Some(PayloadChunk {
+                index: None,
                 offset: Some(body_size as i64),
                 flags: Some(1), // lastChunk
                 body: Some(vec![]),

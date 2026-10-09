@@ -90,6 +90,8 @@ impl TcpServer {
         #[cfg(not(windows))]
         let socket: Box<dyn crate::utils::IoStream> = Box::new(TcpStream::connect(si.addr.clone()).await?);
 
+        let crate::OutboundPayload::Files(files) = &si.ob;
+        let total_bytes: u64 = files.iter().filter_map(|f| std::fs::metadata(f).ok()).map(|m| m.len()).sum();
         let mut or = OutboundRequest::new(
             self.endpoint_id,
             socket,
@@ -101,6 +103,13 @@ impl TcpServer {
                 name: si.name,
             },
         );
+
+        // Over Bluetooth, move payloads worth it to the phone's Wi-Fi: joining
+        // its network takes a few seconds, more than 1 MB takes longer than that.
+        #[cfg(windows)]
+        if crate::hdl::rfcomm::parse_bt_addr(&si.addr).is_some() && total_bytes > 1024 * 1024 {
+            or.enable_wifi_upgrade();
+        }
 
         // Send connection request
         or.send_connection_request().await?;

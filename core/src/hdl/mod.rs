@@ -17,6 +17,8 @@ pub mod ble_scan;
 #[cfg(windows)]
 pub mod rfcomm;
 #[cfg(windows)]
+pub mod wifi_join;
+#[cfg(windows)]
 mod blea;
 #[cfg(windows)]
 pub use blea::*;
