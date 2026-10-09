@@ -32,4 +32,7 @@ pub struct TransferMetadata {
 
     pub total_bytes: u64,
     pub ack_bytes: u64,
+
+    /// "upgrading" while moving a Bluetooth transfer to Wi-Fi, "wifi" once moved.
+    pub transport: Option<String>,
 }

@@ -268,6 +268,16 @@ function setStatus(t, text, pin) {
     p.textContent = pin;
     s.append(" · PIN ", p);
   }
+  if (t.via) s.append(` · ${t.via}`);
+}
+
+// How the bytes travel: nothing to say on the shared Wi-Fi network; over
+// Bluetooth the core reports the move to the phone's Wi-Fi Direct network.
+function transportLabel(m) {
+  const transport = m.meta?.transport;
+  if (transport === "upgrading") return "passaggio al Wi-Fi…";
+  if (transport === "wifi") return "via Wi-Fi Direct";
+  return m.id.startsWith("bt:") ? "via Bluetooth" : "";
 }
 
 function setProgress(t, mode, value = 0) {
@@ -297,6 +307,7 @@ function renderTransfer(m) {
   const meta = m.meta || {};
   const inbound = m.rtype === "Inbound";
   const t = transferEl(m.id, m.rtype);
+  if (!t.done) t.via = transportLabel(m);
   if (t.done && m.state !== "Initial") return;
   if (m.state === "Initial") {
     t.done = false;
@@ -342,7 +353,7 @@ function renderTransfer(m) {
       break;
     case "Finished":
       if (meta.text_payload) t.text = meta.text_payload;
-      finishTransfer(m.id, "ok", inbound ? (t.text ? t.text : `Ricevuto in ${meta.destination || "Download"}`) : "Inviato");
+      finishTransfer(m.id, "ok", inbound ? (t.text ? t.text : "Ricevuto") : "Inviato");
       if (t.text) {
         t.el.querySelector(".transfer-status").textContent = meta.text_type === "Url" ? "Link ricevuto" : "Testo ricevuto";
         const box = document.createElement("div");

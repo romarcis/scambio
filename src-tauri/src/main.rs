@@ -150,6 +150,46 @@ fn fit_to_work_area(w: &tauri::WebviewWindow) {
     }
 }
 
+fn show_main(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.show();
+        let _ = w.unminimize();
+        let _ = w.set_focus();
+    }
+}
+
+/// Tray icon: left click reopens the window, the menu reopens or quits.
+fn build_tray(app: &tauri::App) -> tauri::Result<()> {
+    use tauri::menu::{Menu, MenuItem};
+    use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+
+    let open = MenuItem::with_id(app, "open", "Apri Scambio", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "Esci", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&open, &quit])?;
+    TrayIconBuilder::with_id("main")
+        .icon(app.default_window_icon().cloned().expect("app icon"))
+        .tooltip("Scambio")
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id.as_ref() {
+            "open" => show_main(app),
+            "quit" => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                show_main(tray.app_handle());
+            }
+        })
+        .build(app)?;
+    Ok(())
+}
+
 /// Keeps Mica and the page's colour scheme on the same Windows theme.
 fn apply_theme(w: &tauri::WebviewWindow, theme: tauri::Theme) -> bool {
     let _ = w.set_theme(Some(theme));
@@ -170,6 +210,9 @@ async fn main() {
     let (endpoints, _) = broadcast::channel(32);
 
     tauri::Builder::default()
+        // Launching the exe again while Scambio sits in the tray reopens it
+        // instead of starting a second copy that would fight over Bluetooth.
+        .plugin(tauri_plugin_single_instance::init(|app, _, _| show_main(app)))
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState {
             rqs: Mutex::new(rqs),
@@ -197,12 +240,21 @@ async fn main() {
                 fit_to_work_area(&w);
             }
 
+            build_tray(app)?;
+
             let handle = app.handle().clone();
             let mut rx = messages.subscribe();
             tauri::async_runtime::spawn(async move {
                 loop {
                     match rx.recv().await {
                         Ok(m) if m.direction == ChannelDirection::LibToFront => {
+                            // A phone is waiting for consent: bring the window
+                            // back from the tray so the request can be answered.
+                            if m.state == Some(rqs_lib::State::WaitingForUserConsent)
+                                && m.rtype == Some(rqs_lib::channel::TransferType::Inbound)
+                            {
+                                show_main(&handle);
+                            }
                             let _ = handle.emit("transfer", m);
                         }
                         Err(broadcast::error::RecvError::Closed) => break,
@@ -227,6 +279,11 @@ async fn main() {
             Ok(())
         })
         .on_window_event(|window, event| {
+            // Closing hides to the tray: Scambio keeps receiving in the background.
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+            }
             if let tauri::WindowEvent::ThemeChanged(theme) = event {
                 if let Some(w) = window.app_handle().get_webview_window("main") {
                     apply_theme(&w, *theme);

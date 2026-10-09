@@ -909,10 +909,20 @@ impl InboundRequest {
             // Over Bluetooth, move to Wi-Fi while the person reads the consent
             // dialog: their answer waits in the channel until we are done.
             if self.state.id.starts_with("bt:") && total_bytes > super::bwu::MIN_UPGRADE_BYTES {
+                self.set_transport(Some("upgrading")).await;
                 match self.try_wifi_upgrade().await {
-                    Ok(true) => info!("BWU: transfer will arrive over Wi-Fi"),
-                    Ok(false) => info!("BWU: staying on Bluetooth"),
-                    Err(e) => warn!("BWU: upgrade failed ({e}); staying on Bluetooth"),
+                    Ok(true) => {
+                        self.set_transport(Some("wifi")).await;
+                        info!("BWU: transfer will arrive over Wi-Fi")
+                    }
+                    Ok(false) => {
+                        self.set_transport(None).await;
+                        info!("BWU: staying on Bluetooth")
+                    }
+                    Err(e) => {
+                        self.set_transport(None).await;
+                        warn!("BWU: upgrade failed ({e}); staying on Bluetooth")
+                    }
                 }
                 for offline in std::mem::take(&mut self.stashed) {
                     Box::pin(self.process_offline(offline)).await?;
@@ -1452,6 +1462,18 @@ impl InboundRequest {
         .await;
 
         self.state.client_seq
+    }
+
+    async fn set_transport(&mut self, transport: Option<&str>) {
+        self.update_state(
+            |e| {
+                if let Some(m) = e.transfer_metadata.as_mut() {
+                    m.transport = transport.map(String::from);
+                }
+            },
+            true,
+        )
+        .await;
     }
 
     async fn update_state<F>(&mut self, f: F, inform: bool)
