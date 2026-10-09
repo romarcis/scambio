@@ -4,7 +4,7 @@ Scambio is a portable Windows application that exchanges files with nearby Andro
 
 ## Features
 
-- **Discovery of nearby devices.** Android phones and tablets that are visible over Quick Share are listed as they are found, whether they share the computer's local network or are reachable only over Bluetooth.
+- **Discovery of nearby devices.** Android phones and tablets that are visible over Quick Share are listed as they are found, whether they share the computer's local network or are reachable only over Bluetooth. A badge on each device indicates how it is reached: the shared Wi-Fi network, Bluetooth, or, during a transfer that has moved off Bluetooth, Wi-Fi Direct.
 - **Transfers without a shared network.** When the computer and the phone are not connected to the same network, the connection is established over Bluetooth. Transfers larger than 1 MB then move automatically to a temporary Wi-Fi Direct network hosted by the phone, so that they proceed at Wi-Fi speed. The computer leaves that network when the transfer ends, and Windows reconnects it to its usual network.
 - **Sending files.** Files may be selected through a file picker or dropped onto the window, and are sent to the chosen device after the recipient accepts the transfer.
 - **Receiving files.** The computer is advertised as a Quick Share destination. Each incoming request shows the sender, the files and a confirmation PIN, and nothing is saved until the user accepts it.

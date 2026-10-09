@@ -106,18 +106,34 @@ function addDevice(info) {
   el.querySelector(".device-name").textContent = info.name;
   const btn = el.querySelector(".device-btn");
   btn.title = `Invia a ${info.name}`;
-  if (isBt(info)) {
-    const badge = document.createElement("span");
-    badge.className = "bt-badge";
-    badge.innerHTML = '<i class="ic">\uE702</i>';
-    el.querySelector(".device-avatar").append(badge);
-    btn.title += " via Bluetooth";
-  }
+  const badge = document.createElement("span");
+  badge.className = "link-badge";
+  badge.innerHTML = '<i class="ic"></i>';
+  el.querySelector(".device-avatar").append(badge);
   btn.setAttribute("aria-label", `Invia file a ${info.name}`);
   btn.addEventListener("click", () => sendTo(info));
   $("devices").append(el);
   devices.set(info.id, { info, el, slot });
+  setLink(info.id);
   updateRadarStatus();
+}
+
+// How a device on the radar is reached: the shared Wi-Fi network, Bluetooth,
+// or (during a transfer that moved off Bluetooth) the phone's Wi-Fi Direct network.
+const LINKS = {
+  lan: ["\uE701", "Sulla stessa rete Wi-Fi"],
+  bt: ["\uE702", "Via Bluetooth"],
+  wd: ["\uE88A", "Trasferimento via Wi-Fi Direct"],
+};
+
+function setLink(id, kind) {
+  const d = devices.get(id);
+  if (!d) return;
+  const [glyph, label] = LINKS[kind || (isBt(d.info) ? "bt" : "lan")];
+  const badge = d.el.querySelector(".link-badge");
+  badge.querySelector(".ic").textContent = glyph;
+  badge.title = label;
+  d.el.querySelector(".device-btn").title = `Invia a ${d.info.name} · ${label.toLowerCase()}`;
 }
 
 function removeDevice(id) {
@@ -290,6 +306,7 @@ function setProgress(t, mode, value = 0) {
 function finishTransfer(id, kind, text) {
   const t = transferEl(id, transfers.get(id)?.rtype || "Outbound");
   t.done = true;
+  setLink(id);
   t.el.classList.remove("ok", "fail");
   t.el.classList.add(kind);
   t.el.querySelector(".transfer-icon").textContent = ICONS[kind];
@@ -307,7 +324,10 @@ function renderTransfer(m) {
   const meta = m.meta || {};
   const inbound = m.rtype === "Inbound";
   const t = transferEl(m.id, m.rtype);
-  if (!t.done) t.via = transportLabel(m);
+  if (!t.done) {
+    t.via = transportLabel(m);
+    setLink(m.id, m.meta?.transport === "wifi" ? "wd" : undefined);
+  }
   if (t.done && m.state !== "Initial") return;
   if (m.state === "Initial") {
     t.done = false;

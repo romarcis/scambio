@@ -626,8 +626,8 @@ html:not(.mica) .device-avatar { background: var(--dialog); }
   .device.busy:not(.has-progress) .device-avatar::after { animation: none; border-color: var(--accent); }
 }
 
-/* Phone reached over Bluetooth (no shared network) */
-.bt-badge {
+/* How the phone is reached: shared Wi-Fi, Bluetooth, or Wi-Fi Direct */
+.link-badge {
   position: absolute;
   right: -4px;
   bottom: -4px;
@@ -640,4 +640,4 @@ html:not(.mica) .device-avatar { background: var(--dialog); }
   color: var(--on-accent);
   border: 2px solid var(--bg-solid);
 }
-.bt-badge .ic { font-size: 10px; }
+.link-badge .ic { font-size: 10px; }
