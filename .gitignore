@@ -1,0 +1,9 @@
+/target
+.impeccable/live/
+.impeccable/review/
+.impeccable/config.local.json
+/core/bindings
+/src-tauri/gen
+.impeccable/questions/
+.impeccable/brief-body.md
+.impeccable/direction-payload.json

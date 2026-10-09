@@ -1,0 +1,25 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Scambio",
+  "version": "0.1.0",
+  "identifier": "io.github.romarcis.scambio",
+  "build": { "frontendDist": "../ui" },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "Scambio",
+        "width": 440,
+        "height": 700,
+        "minWidth": 380,
+        "minHeight": 560,
+        "decorations": false,
+        "transparent": true,
+        "dragDropEnabled": true
+      }
+    ],
+    "security": { "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'" }
+  },
+  "bundle": { "active": false, "icon": ["icons/icon.ico"] }
+}

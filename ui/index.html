@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Scambio</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="titlebar" data-tauri-drag-region>
+    <img class="titlebar-icon" src="icon.svg" alt="" data-tauri-drag-region>
+    <span class="titlebar-title" data-tauri-drag-region>Scambio</span>
+    <div class="caption">
+      <button class="caption-btn" id="btn-min" aria-label="Riduci a icona"><i class="ic">&#xE921;</i></button>
+      <button class="caption-btn close" id="btn-close" aria-label="Chiudi"><i class="ic">&#xE8BB;</i></button>
+    </div>
+  </header>
+
+  <main class="content">
+    <section class="radar" aria-label="Dispositivi nelle vicinanze">
+      <div class="radar-stage" id="radar">
+        <div class="ring r1"></div>
+        <div class="ring r2"></div>
+        <div class="ring r3"></div>
+        <div class="pulse" aria-hidden="true"></div>
+        <div class="pulse late" aria-hidden="true"></div>
+        <div class="me">
+          <div class="avatar me-avatar"><i class="ic">&#xE7F8;</i></div>
+          <span class="me-name" id="me-name">Questo PC</span>
+        </div>
+        <ul class="devices" id="devices" aria-live="polite"></ul>
+      </div>
+      <p class="radar-status" id="radar-status" role="status">Cerco dispositivi nelle vicinanze…</p>
+    </section>
+
+    <div class="infobar caution" id="help" hidden>
+      <i class="ic infobar-icon">&#xE946;</i>
+      <div class="infobar-body">
+        <strong>Nessun dispositivo trovato</strong>
+        <ul>
+          <li>Il PC e il telefono devono essere sulla stessa rete Wi-Fi.</li>
+          <li>Sul telefono apri Quick Share e imposta la visibilità su <em>Tutti</em>, oppure tieni aperto il pannello Condividi.</li>
+          <li>Se Windows lo chiede, consenti a Scambio l'accesso alle reti private.</li>
+        </ul>
+      </div>
+      <button class="btn subtle icon-only" id="help-close" aria-label="Chiudi suggerimenti"><i class="ic">&#xE711;</i></button>
+    </div>
+
+    <div class="infobar critical" id="error" role="alert" hidden>
+      <i class="ic infobar-icon">&#xEB90;</i>
+      <div class="infobar-body">
+        <strong id="error-title"></strong>
+        <p id="error-text"></p>
+        <span class="caption-text error-detail" id="error-detail"></span>
+      </div>
+      <button class="btn subtle icon-only" id="error-close" aria-label="Chiudi errore"><i class="ic">&#xE711;</i></button>
+    </div>
+
+    <section class="transfers" id="transfers-wrap" aria-labelledby="transfers-title" hidden>
+      <h2 id="transfers-title" class="section-title">Attività</h2>
+      <ul class="transfer-list" id="transfers"></ul>
+    </section>
+
+    <section class="group" aria-labelledby="files-title">
+      <h2 id="files-title" class="section-title">File da inviare</h2>
+      <div class="card files" id="files-card">
+        <div class="drop" id="drop-empty">
+          <i class="ic drop-icon">&#xE898;</i>
+          <p>Trascina qui i file, poi scegli un dispositivo sul radar.</p>
+          <button class="btn accent" id="pick">Scegli file</button>
+        </div>
+        <ul class="file-list" id="file-list" hidden></ul>
+        <div class="files-foot" id="files-foot" hidden>
+          <span class="caption-text" id="files-count"></span>
+          <span class="files-actions">
+            <button class="btn subtle" id="files-clear">Svuota</button>
+            <button class="btn" id="pick-more"><i class="ic">&#xE710;</i>Aggiungi</button>
+          </span>
+        </div>
+      </div>
+    </section>
+
+    <section class="group" aria-labelledby="recv-title">
+      <h2 id="recv-title" class="section-title">Ricezione</h2>
+      <div class="card settings">
+        <div class="setting">
+          <i class="ic setting-icon">&#xE896;</i>
+          <div class="setting-text">
+            <label for="visible">Visibile ai dispositivi vicini</label>
+            <span class="caption-text" id="visible-desc">I telefoni vicini possono inviarti file. Dovrai sempre accettare.</span>
+          </div>
+          <label class="toggle">
+            <input type="checkbox" id="visible" role="switch" checked>
+            <span class="toggle-track"><span class="toggle-thumb"></span></span>
+            <span class="toggle-label" aria-hidden="true">Attivato</span>
+          </label>
+        </div>
+        <div class="setting">
+          <i class="ic setting-icon">&#xE8B7;</i>
+          <div class="setting-text">
+            <span class="setting-label">Salva in</span>
+            <span class="caption-text path" id="download-dir">Download</span>
+          </div>
+          <div class="setting-actions">
+            <button class="btn" id="open-dir">Apri</button>
+            <button class="btn" id="change-dir">Cambia</button>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <div class="dropzone-overlay" id="drop-overlay" hidden>
+    <div class="dropzone-box">
+      <i class="ic">&#xE898;</i>
+      <span>Rilascia per aggiungere i file</span>
+    </div>
+  </div>
+
+  <div class="smoke" id="dialog-smoke" hidden>
+    <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="dlg-title" aria-describedby="dlg-desc">
+      <div class="dialog-body">
+        <h2 id="dlg-title"></h2>
+        <p id="dlg-desc" class="dialog-desc"></p>
+        <ul class="dialog-files" id="dlg-files"></ul>
+        <div class="pin">
+          <span class="pin-label">PIN</span>
+          <span class="pin-code" id="dlg-pin"></span>
+          <span class="caption-text">Controlla che sia uguale a quello sul telefono.</span>
+        </div>
+      </div>
+      <div class="dialog-foot">
+        <button class="btn accent" id="dlg-accept">Accetta</button>
+        <button class="btn" id="dlg-reject">Rifiuta</button>
+      </div>
+    </div>
+  </div>
+
+  <template id="tpl-device">
+    <li class="device">
+      <button class="device-btn">
+        <span class="avatar device-avatar"><i class="ic"></i></span>
+        <span class="device-name"></span>
+      </button>
+    </li>
+  </template>
+
+  <template id="tpl-file">
+    <li class="file-row">
+      <i class="ic file-icon">&#xE8A5;</i>
+      <span class="file-text"><span class="file-name"></span><span class="caption-text file-dir"></span></span>
+      <button class="btn subtle icon-only file-remove"><i class="ic">&#xE711;</i></button>
+    </li>
+  </template>
+
+  <template id="tpl-transfer">
+    <li class="card transfer">
+      <div class="transfer-head">
+        <i class="ic transfer-icon"></i>
+        <div class="transfer-text">
+          <span class="transfer-title"></span>
+          <span class="caption-text transfer-status"></span>
+        </div>
+        <div class="transfer-actions"></div>
+      </div>
+      <div class="progress" hidden><div class="progress-fill"></div></div>
+    </li>
+  </template>
+
+  <script src="app.js"></script>
+</body>
+</html>
