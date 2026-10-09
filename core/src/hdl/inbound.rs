@@ -13,7 +13,6 @@ use prost::Message;
 use rand::Rng;
 use sha2::{Digest, Sha256, Sha512};
 use tokio::io::AsyncWriteExt;
-use tokio::net::TcpStream;
 use tokio::sync::broadcast::{Receiver, Sender};
 
 use super::{InnerState, State};
@@ -47,14 +46,14 @@ const SANITY_DURATION: Duration = Duration::from_micros(10);
 
 #[derive(Debug)]
 pub struct InboundRequest {
-    socket: TcpStream,
+    socket: Box<dyn crate::utils::IoStream>,
     pub state: InnerState,
     sender: Sender<ChannelMessage>,
     receiver: Receiver<ChannelMessage>,
 }
 
 impl InboundRequest {
-    pub fn new(socket: TcpStream, id: String, sender: Sender<ChannelMessage>) -> Self {
+    pub fn new(socket: Box<dyn crate::utils::IoStream>, id: String, sender: Sender<ChannelMessage>) -> Self {
         let receiver = sender.subscribe();
 
         Self {

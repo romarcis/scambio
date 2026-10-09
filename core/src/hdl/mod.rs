@@ -13,6 +13,10 @@ mod ble;
 #[cfg(feature = "experimental")]
 pub use ble::*;
 #[cfg(windows)]
+pub mod ble_scan;
+#[cfg(windows)]
+pub mod rfcomm;
+#[cfg(windows)]
 mod blea;
 #[cfg(windows)]
 pub use blea::*;

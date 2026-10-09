@@ -64,37 +64,7 @@ impl TcpServer {
                     match r {
                         Ok((socket, remote_addr)) => {
                             trace!("{INNER_NAME}: new client: {remote_addr}");
-                            let esender = self.sender.clone();
-                            let csender = self.sender.clone();
-
-                            tokio::spawn(async move {
-                                let mut ir = InboundRequest::new(socket, remote_addr.to_string(), csender);
-
-                                loop {
-                                    match ir.handle().await {
-                                        Ok(_) => {},
-                                        Err(e) => match e.downcast_ref() {
-                                            Some(AppError::NotAnError) => break,
-                                            None => {
-                                                if ir.state.state == State::Initial {
-                                                    break;
-                                                }
-
-                                                if ir.state.state != State::Finished {
-                                                    let _ = esender.send(ChannelMessage {
-                                                        id: remote_addr.to_string(),
-                                                        direction: ChannelDirection::LibToFront,
-                                                        state: Some(State::Disconnected),
-                                                        ..Default::default()
-                                                    });
-                                                }
-                                                error!("{INNER_NAME}: error while handling client: {e} ({:?})", ir.state.state);
-                                                break;
-                                            }
-                                        },
-                                    }
-                                }
-                            });
+                            spawn_inbound(Box::new(socket), remote_addr.to_string(), self.sender.clone());
                         },
                         Err(err) => {
                             error!("{INNER_NAME}: error accepting: {}", err);
@@ -111,7 +81,14 @@ impl TcpServer {
     /// To be called inside a separate task if we want to handle concurrency
     pub async fn connect(&self, ctk: CancellationToken, si: SendInfo) -> Result<(), anyhow::Error> {
         debug!("{INNER_NAME}: Connecting to: {}", si.addr);
-        let socket = TcpStream::connect(si.addr.clone()).await?;
+        // "bt:<MAC>" = phone found over BLE, reached over Bluetooth RFCOMM.
+        #[cfg(windows)]
+        let socket: Box<dyn crate::utils::IoStream> = match crate::hdl::rfcomm::parse_bt_addr(&si.addr) {
+            Some(mac) => Box::new(crate::hdl::rfcomm::connect_stream(mac).await?),
+            None => Box::new(TcpStream::connect(si.addr.clone()).await?),
+        };
+        #[cfg(not(windows))]
+        let socket: Box<dyn crate::utils::IoStream> = Box::new(TcpStream::connect(si.addr.clone()).await?);
 
         let mut or = OutboundRequest::new(
             self.endpoint_id,
@@ -164,4 +141,36 @@ impl TcpServer {
 
         Ok(())
     }
+}
+
+/// Runs the receive side of one connection (TCP or Bluetooth) until it ends.
+pub fn spawn_inbound(socket: Box<dyn crate::utils::IoStream>, remote_addr: String, sender: Sender<ChannelMessage>) {
+    tokio::spawn(async move {
+        let mut ir = InboundRequest::new(socket, remote_addr.clone(), sender.clone());
+
+        loop {
+            match ir.handle().await {
+                Ok(_) => {}
+                Err(e) => match e.downcast_ref() {
+                    Some(AppError::NotAnError) => break,
+                    None => {
+                        if ir.state.state == State::Initial {
+                            break;
+                        }
+
+                        if ir.state.state != State::Finished {
+                            let _ = sender.send(ChannelMessage {
+                                id: remote_addr.clone(),
+                                direction: ChannelDirection::LibToFront,
+                                state: Some(State::Disconnected),
+                                ..Default::default()
+                            });
+                        }
+                        error!("{INNER_NAME}: error while handling client: {e} ({:?})", ir.state.state);
+                        break;
+                    }
+                },
+            }
+        }
+    });
 }

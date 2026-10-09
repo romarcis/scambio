@@ -131,6 +131,25 @@ fn open_download_dir(state: State<'_, AppState>) {
     let _ = std::process::Command::new("explorer").arg(dir).spawn();
 }
 
+/// The default 700px height does not fit small or highly scaled screens
+/// (1080p at 150% leaves ~670px above the taskbar): shrink to the monitor's
+/// work area and center, so the bottom of the window is never off-screen.
+fn fit_to_work_area(w: &tauri::WebviewWindow) {
+    let (Ok(Some(monitor)), Ok(size)) = (w.current_monitor(), w.outer_size()) else {
+        return;
+    };
+    let area = monitor.work_area();
+    let margin = (16.0 * monitor.scale_factor()) as u32;
+    let max_h = area.size.height.saturating_sub(2 * margin);
+    if size.height > max_h {
+        let _ = w.set_size(tauri::PhysicalSize::new(size.width, max_h));
+        let _ = w.set_position(tauri::PhysicalPosition::new(
+            area.position.x + (area.size.width.saturating_sub(size.width) / 2) as i32,
+            area.position.y + margin as i32,
+        ));
+    }
+}
+
 /// Keeps Mica and the page's colour scheme on the same Windows theme.
 fn apply_theme(w: &tauri::WebviewWindow, theme: tauri::Theme) -> bool {
     let _ = w.set_theme(Some(theme));
@@ -175,6 +194,7 @@ async fn main() {
             if let Some(w) = app.get_webview_window("main") {
                 let ok = apply_theme(&w, w.theme().unwrap_or(tauri::Theme::Light));
                 *app.state::<AppState>().mica.lock().unwrap() = ok;
+                fit_to_work_area(&w);
             }
 
             let handle = app.handle().clone();

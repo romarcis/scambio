@@ -23,6 +23,8 @@ use crate::hdl::MDnsServer;
 use crate::manager::TcpServer;
 
 pub mod channel;
+#[cfg(windows)]
+pub use hdl::{ble_scan, rfcomm};
 mod errors;
 mod hdl;
 mod manager;
@@ -143,6 +145,32 @@ impl RQS {
             }
         }
 
+        // Bluetooth receive path: RFCOMM listener + BLE advertisement with our MAC.
+        #[cfg(windows)]
+        match hdl::rfcomm::Listener::bind() {
+            Ok(listener) => {
+                let einfo = utils::endpoint_info(DeviceType::Laptop as u8, &utils::device_name());
+                let sd = hdl::receiver_service_data(endpoint_id[..4].try_into()?, &einfo, listener.mac);
+                let sender = self.message_sender.clone();
+                listener.serve(
+                    move |stream, who| manager::spawn_inbound(Box::new(stream), who, sender.clone()),
+                    ctoken.clone(),
+                );
+                match hdl::ReceiverAdvertiser::new(&sd) {
+                    Ok(adv) => {
+                        let (vis, ctk) = (self.visibility_receiver.clone(), ctoken.clone());
+                        tracker.spawn(async move {
+                            if let Err(e) = adv.run(vis, ctk).await {
+                                error!("ReceiverAdvertiser: {e}");
+                            }
+                        });
+                    }
+                    Err(e) => warn!("Bluetooth receive: can't advertise over BLE: {e}"),
+                }
+            }
+            Err(e) => warn!("Bluetooth receive unavailable: {e}"),
+        }
+
         // Start MDnsServer in own "task"
         let mut mdns = MDnsServer::new(
             endpoint_id[..4].try_into()?,
@@ -189,6 +217,12 @@ impl RQS {
             });
         }
 
+        #[cfg(windows)]
+        {
+            let (sender, ctk) = (sender.clone(), ctk.clone());
+            tracker.spawn(async move { ble_discovery(sender, ctk).await });
+        }
+
         let discovery = MDnsDiscovery::new(sender)?;
         tracker.spawn(async move { discovery.run(ctk.clone()).await });
 
@@ -230,4 +264,49 @@ impl RQS {
         let mut guard = CUSTOM_DOWNLOAD.write().unwrap();
         *guard = p;
     }
+}
+
+/// Phones in receive mode found over BLE, reported as endpoints whose id is
+/// "bt:<MAC>" (sent to over Bluetooth RFCOMM). An endpoint not heard for
+/// `LOST_AFTER` is reported lost (an `EndpointInfo` with only the id).
+#[cfg(windows)]
+async fn ble_discovery(sender: broadcast::Sender<EndpointInfo>, ctk: CancellationToken) {
+    use std::collections::HashMap;
+    use std::time::{Duration, Instant};
+    const LOST_AFTER: Duration = Duration::from_secs(20);
+
+    let (tx, mut rx) = mpsc::channel(64);
+    let scan_ctk = ctk.child_token();
+    tokio::spawn(hdl::ble_scan::scan(tx, scan_ctk.clone()));
+    let mut seen: HashMap<String, Instant> = HashMap::new();
+    let mut tick = tokio::time::interval(Duration::from_secs(5));
+    loop {
+        tokio::select! {
+            _ = ctk.cancelled() => break,
+            _ = tick.tick() => {
+                seen.retain(|id, last| {
+                    let alive = last.elapsed() < LOST_AFTER;
+                    if !alive {
+                        let _ = sender.send(EndpointInfo { id: id.clone(), ..Default::default() });
+                    }
+                    alive
+                });
+            }
+            Some(r) = rx.recv() => {
+                let (Some(mac), true) = (r.bt_mac, r.visible) else { continue };
+                let id = hdl::rfcomm::format_bt_addr(mac);
+                if seen.insert(id.clone(), Instant::now()).is_none() {
+                    let _ = sender.send(EndpointInfo {
+                        fullname: id.clone(),
+                        id,
+                        name: r.name.or(Some("Android".into())),
+                        rtype: Some(r.device_type),
+                        present: Some(true),
+                        ..Default::default()
+                    });
+                }
+            }
+        }
+    }
+    scan_ctk.cancel();
 }

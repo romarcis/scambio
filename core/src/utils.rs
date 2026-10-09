@@ -14,7 +14,6 @@ use rand::{Rng, RngCore};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use tokio::io::AsyncReadExt;
-use tokio::net::TcpStream;
 use ts_rs::TS;
 
 use crate::CUSTOM_DOWNLOAD;
@@ -86,22 +85,30 @@ pub fn gen_mdns_name(endpoint_id: [u8; 4]) -> String {
     URL_SAFE_NO_PAD.encode(&name_b)
 }
 
-pub fn gen_mdns_endpoint_info(device_type: u8, device_name: &str) -> String {
+/// Salt + metadata-key hash of the endpoint info. Fixed for the whole run so
+/// the mDNS and BLE advertisements are byte-identical and the phone merges
+/// them into one share target.
+static ENDPOINT_IDENTITY: once_cell::sync::Lazy<[u8; 16]> =
+    once_cell::sync::Lazy::new(|| rand::rng().random::<[u8; 16]>());
+
+/// Nearby Share endpoint info: header, identity, plaintext name ("Everyone").
+pub fn endpoint_info(device_type: u8, device_name: &str) -> Vec<u8> {
     let mut record = Vec::new();
 
     // 1 byte: Version(3 bits)|Visibility(1 bit)|Device Type(3 bits)|Reserved(1 bits)
     // Device types: unknown=0, phone=1, tablet=2, laptop=3
     record.push(device_type << 1);
+    record.extend_from_slice(ENDPOINT_IDENTITY.as_slice());
 
-    let unknown_bytes = rand::rng().random::<[u8; 16]>();
-    record.extend_from_slice(&unknown_bytes);
+    let mut name = device_name.as_bytes().to_vec();
+    name.truncate(255);
+    record.push(name.len() as u8);
+    record.extend_from_slice(&name);
+    record
+}
 
-    let device_name = device_name.as_bytes();
-    let length = device_name.len() as u8;
-    record.push(length);
-    record.extend_from_slice(device_name);
-
-    URL_SAFE_NO_PAD.encode(&record)
+pub fn gen_mdns_endpoint_info(device_type: u8, device_name: &str) -> String {
+    URL_SAFE_NO_PAD.encode(endpoint_info(device_type, device_name))
 }
 
 pub fn parse_mdns_endpoint_info(encoded_str: &str) -> Result<(DeviceType, String), anyhow::Error> {
@@ -122,8 +129,12 @@ pub fn parse_mdns_endpoint_info(encoded_str: &str) -> Result<(DeviceType, String
     Ok((DeviceType::from_raw_value(device_type), device_name))
 }
 
+/// Any byte stream a transfer can run over: TCP, or a Bluetooth socket bridge.
+pub trait IoStream: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Sync + Unpin + std::fmt::Debug {}
+impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Sync + Unpin + std::fmt::Debug> IoStream for T {}
+
 pub async fn stream_read_exact(
-    socket: &mut TcpStream,
+    socket: &mut (impl tokio::io::AsyncRead + Unpin),
     buf: &mut [u8],
 ) -> Result<(), anyhow::Error> {
     match socket.read_exact(buf).await {

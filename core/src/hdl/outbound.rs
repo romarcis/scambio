@@ -16,7 +16,6 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256, Sha512};
 use tokio::io::AsyncWriteExt;
-use tokio::net::TcpStream;
 use tokio::sync::broadcast::{Receiver, Sender};
 use ts_rs::TS;
 
@@ -62,7 +61,7 @@ pub enum OutboundPayload {
 #[derive(Debug)]
 pub struct OutboundRequest {
     endpoint_id: [u8; 4],
-    socket: TcpStream,
+    socket: Box<dyn crate::utils::IoStream>,
     pub state: InnerState,
     sender: Sender<ChannelMessage>,
     receiver: Receiver<ChannelMessage>,
@@ -72,7 +71,7 @@ pub struct OutboundRequest {
 impl OutboundRequest {
     pub fn new(
         endpoint_id: [u8; 4],
-        socket: TcpStream,
+        socket: Box<dyn crate::utils::IoStream>,
         id: String,
         sender: Sender<ChannelMessage>,
         payload: OutboundPayload,
@@ -760,6 +759,14 @@ impl OutboundRequest {
                         Some(i) => i,
                         None => {
                             info!("All files have been transferred");
+                            // Let the receiver finalize the file and hang up first: a
+                            // DISCONNECTION right after the last chunk makes Android
+                            // report "can't transfer" on slow links (Bluetooth).
+                            // Approach from open-quickshare.
+                            if !self.wait_for_peer_close(Duration::from_secs(8)).await {
+                                self.disconnection().await?;
+                                self.wait_for_peer_close(Duration::from_secs(2)).await;
+                            }
                             self.update_state(
                                 |e| {
                                     e.state = State::Finished;
@@ -767,7 +774,6 @@ impl OutboundRequest {
                                 true,
                             )
                             .await;
-                            self.disconnection().await?;
                             // Breaking instead of NotAnError to allow peacefull termination
                             break;
                         }
@@ -939,6 +945,26 @@ impl OutboundRequest {
         }
 
         Ok(())
+    }
+
+    /// Drains (and discards) incoming frames until the peer closes the
+    /// connection or `grace` elapses. `true` if the peer closed.
+    async fn wait_for_peer_close(&mut self, grace: Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + grace;
+        let mut len = [0u8; 4];
+        loop {
+            match tokio::time::timeout_at(deadline, stream_read_exact(&mut self.socket, &mut len)).await {
+                Err(_) => return false,
+                Ok(Err(_)) => return true,
+                Ok(Ok(())) => {
+                    let n = u32::from_be_bytes(len) as usize;
+                    let mut frame = vec![0u8; n.min(SANE_FRAME_LENGTH as usize)];
+                    if n > frame.len() || stream_read_exact(&mut self.socket, &mut frame).await.is_err() {
+                        return true;
+                    }
+                }
+            }
+        }
     }
 
     async fn disconnection(&mut self) -> Result<(), anyhow::Error> {

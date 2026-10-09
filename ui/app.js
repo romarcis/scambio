@@ -77,8 +77,23 @@ function armHelp() {
   }, 15000);
 }
 
+// A phone in reach over both Wi-Fi and Bluetooth shows once, on Wi-Fi (faster);
+// its Bluetooth entry waits here and comes back if the Wi-Fi one goes away.
+const shadowedBt = new Map(); // name -> Bluetooth endpoint info
+const isBt = (info) => !info.ip;
+const byName = (name) => [...devices.values()].find((d) => d.info.name === name);
+
 function addDevice(info) {
   if (devices.has(info.id)) return;
+  const twin = byName(info.name);
+  if (twin && isBt(info) && !isBt(twin.info)) {
+    shadowedBt.set(info.name, info);
+    return;
+  }
+  if (twin && !isBt(info) && isBt(twin.info)) {
+    removeDevice(twin.info.id);
+    shadowedBt.set(info.name, twin.info);
+  }
   const used = new Set([...devices.values()].map((d) => d.slot));
   const slot = SLOTS.findIndex((_, i) => !used.has(i));
   if (slot < 0) return; // radar full; more than 12 phones around is not a real case
@@ -91,6 +106,13 @@ function addDevice(info) {
   el.querySelector(".device-name").textContent = info.name;
   const btn = el.querySelector(".device-btn");
   btn.title = `Invia a ${info.name}`;
+  if (isBt(info)) {
+    const badge = document.createElement("span");
+    badge.className = "bt-badge";
+    badge.innerHTML = '<i class="ic">\uE702</i>';
+    el.querySelector(".device-avatar").append(badge);
+    btn.title += " via Bluetooth";
+  }
   btn.setAttribute("aria-label", `Invia file a ${info.name}`);
   btn.addEventListener("click", () => sendTo(info));
   $("devices").append(el);
@@ -99,9 +121,15 @@ function addDevice(info) {
 }
 
 function removeDevice(id) {
+  for (const [name, info] of shadowedBt) if (info.id === id) shadowedBt.delete(name);
   const d = devices.get(id);
   if (!d) return;
   devices.delete(id);
+  const shadow = shadowedBt.get(d.info.name);
+  if (shadow && !isBt(d.info)) {
+    shadowedBt.delete(d.info.name);
+    addDevice(shadow);
+  }
   d.el.classList.add("leaving");
   d.el.addEventListener("animationend", () => d.el.remove(), { once: true });
   updateRadarStatus();
@@ -180,7 +208,7 @@ async function sendTo(info) {
   renderTransfer({ id: info.id, rtype: "Outbound", state: "Initial", meta: null });
   setDeviceBusy(info.id, true);
   try {
-    await call("send_files", { id: info.id, name: info.name, addr: `${info.ip}:${info.port}`, files: batch });
+    await call("send_files", { id: info.id, name: info.name, addr: isBt(info) ? info.id : `${info.ip}:${info.port}`, files: batch });
     files = [];
     renderFiles();
   } catch {
@@ -330,7 +358,7 @@ function renderTransfer(m) {
       finishTransfer(m.id, "fail", "Annullato");
       break;
     case "Disconnected":
-      finishTransfer(m.id, "fail", "Connessione interrotta. Riprova sulla stessa rete Wi-Fi.");
+      finishTransfer(m.id, "fail", "Connessione interrotta. Avvicina il telefono e riprova.");
       break;
     default:
       setStatus(t, inbound ? "Connessione in corso…" : `Connessione a ${name}…`, meta.pin_code);
