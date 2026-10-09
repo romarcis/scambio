@@ -64,7 +64,7 @@ impl TcpServer {
                     match r {
                         Ok((socket, remote_addr)) => {
                             trace!("{INNER_NAME}: new client: {remote_addr}");
-                            spawn_inbound(Box::new(socket), remote_addr.to_string(), self.sender.clone());
+                            spawn_inbound(self.endpoint_id, Box::new(socket), remote_addr.to_string(), self.sender.clone());
                         },
                         Err(err) => {
                             error!("{INNER_NAME}: error accepting: {}", err);
@@ -153,9 +153,14 @@ impl TcpServer {
 }
 
 /// Runs the receive side of one connection (TCP or Bluetooth) until it ends.
-pub fn spawn_inbound(socket: Box<dyn crate::utils::IoStream>, remote_addr: String, sender: Sender<ChannelMessage>) {
+pub fn spawn_inbound(
+    endpoint_id: [u8; 4],
+    socket: Box<dyn crate::utils::IoStream>,
+    remote_addr: String,
+    sender: Sender<ChannelMessage>,
+) {
     tokio::spawn(async move {
-        let mut ir = InboundRequest::new(socket, remote_addr.clone(), sender.clone());
+        let mut ir = InboundRequest::new(endpoint_id, socket, remote_addr.clone(), sender.clone());
 
         loop {
             match ir.handle().await {

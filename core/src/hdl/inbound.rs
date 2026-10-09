@@ -46,17 +46,31 @@ const SANITY_DURATION: Duration = Duration::from_micros(10);
 
 #[derive(Debug)]
 pub struct InboundRequest {
+    /// Our endpoint id: the phone matches the upgraded channel to it.
+    endpoint_id: [u8; 4],
     socket: Box<dyn crate::utils::IoStream>,
     pub state: InnerState,
     sender: Sender<ChannelMessage>,
     receiver: Receiver<ChannelMessage>,
+    /// Frames that arrived while we negotiated the upgrade, replayed after it.
+    stashed: Vec<OfflineFrame>,
+    /// Membership of the phone's network after a Wi-Fi upgrade.
+    #[cfg(windows)]
+    wifi: Option<super::wifi_join::WifiJoin>,
 }
 
 impl InboundRequest {
-    pub fn new(socket: Box<dyn crate::utils::IoStream>, id: String, sender: Sender<ChannelMessage>) -> Self {
+    pub fn new(
+        endpoint_id: [u8; 4],
+        socket: Box<dyn crate::utils::IoStream>,
+        id: String,
+        sender: Sender<ChannelMessage>,
+    ) -> Self {
         let receiver = sender.subscribe();
 
         Self {
+            endpoint_id,
+            stashed: Vec::new(),
             socket,
             state: InnerState {
                 id,
@@ -68,6 +82,8 @@ impl InboundRequest {
             },
             sender,
             receiver,
+            #[cfg(windows)]
+            wifi: None,
         }
     }
 
@@ -467,6 +483,11 @@ impl InboundRequest {
         &mut self,
         smsg: &SecureMessage,
     ) -> Result<(), anyhow::Error> {
+        let offline = self.decrypt_offline(smsg).await?;
+        self.process_offline(offline).await
+    }
+
+    async fn decrypt_offline(&mut self, smsg: &SecureMessage) -> Result<OfflineFrame, anyhow::Error> {
         let mut hmac = HmacSha256::new_from_slice(self.state.recv_hmac_key.as_ref().unwrap())?;
         hmac.update(&smsg.header_and_body);
         if !hmac
@@ -498,7 +519,10 @@ impl InboundRequest {
             ));
         }
 
-        let offline = location_nearby_connections::OfflineFrame::decode(d2d_msg.message())?;
+        Ok(location_nearby_connections::OfflineFrame::decode(d2d_msg.message())?)
+    }
+
+    async fn process_offline(&mut self, offline: OfflineFrame) -> Result<(), anyhow::Error> {
         let v1_frame = offline
             .v1
             .as_ref()
@@ -881,6 +905,19 @@ impl InboundRequest {
                 true,
             )
             .await;
+
+            // Over Bluetooth, move to Wi-Fi while the person reads the consent
+            // dialog: their answer waits in the channel until we are done.
+            if self.state.id.starts_with("bt:") && total_bytes > super::bwu::MIN_UPGRADE_BYTES {
+                match self.try_wifi_upgrade().await {
+                    Ok(true) => info!("BWU: transfer will arrive over Wi-Fi"),
+                    Ok(false) => info!("BWU: staying on Bluetooth"),
+                    Err(e) => warn!("BWU: upgrade failed ({e}); staying on Bluetooth"),
+                }
+                for offline in std::mem::take(&mut self.stashed) {
+                    Box::pin(self.process_offline(offline)).await?;
+                }
+            }
         } else if introduction.text_metadata.len() == 1 {
             trace!("process_introduction: handling text_metadata");
             let meta = introduction.text_metadata.first().unwrap();
@@ -972,6 +1009,103 @@ impl InboundRequest {
         }
 
         Ok(())
+    }
+
+    async fn read_encrypted_offline_frame(&mut self) -> Result<OfflineFrame, anyhow::Error> {
+        let mut len = [0u8; 4];
+        stream_read_exact(&mut self.socket, &mut len).await?;
+        let n = u32::from_be_bytes(len) as usize;
+        if n > SANE_FRAME_LENGTH as usize {
+            return Err(anyhow!("frame too long"));
+        }
+        let mut buf = vec![0u8; n];
+        stream_read_exact(&mut self.socket, &mut buf).await?;
+        self.decrypt_offline(&SecureMessage::decode(&*buf)?).await
+    }
+
+    fn stash(&mut self, offline: OfflineFrame) {
+        self.stashed.push(offline);
+    }
+
+    /// Drains the Bluetooth channel with LAST_WRITE / SAFE_TO_CLOSE, then
+    /// swaps the socket. Encryption keys and sequence numbers carry over.
+    async fn drain_and_swap(&mut self, up: super::bwu::Upgraded) -> Result<bool, anyhow::Error> {
+        use location_nearby_connections::bandwidth_upgrade_negotiation_frame::EventType;
+
+        self.encrypt_and_send(&super::bwu::frame(EventType::LastWriteToPriorChannel, None, None)).await?;
+        for _ in 0..16 {
+            let Ok(Ok(offline)) =
+                tokio::time::timeout(Duration::from_secs(5), self.read_encrypted_offline_frame()).await
+            else {
+                break;
+            };
+            match super::bwu::event(&offline).map(|b| b.event_type()) {
+                Some(EventType::LastWriteToPriorChannel) => {
+                    let _ = self
+                        .encrypt_and_send(&super::bwu::frame(EventType::SafeToClosePriorChannel, None, None))
+                        .await;
+                }
+                Some(EventType::SafeToClosePriorChannel) => break,
+                Some(other) => debug!("BWU: draining Bluetooth channel, got {other:?}"),
+                None if offline.v1.as_ref().map(|v| v.r#type())
+                    == Some(location_nearby_connections::v1_frame::FrameType::KeepAlive) =>
+                {
+                    self.send_keepalive(true).await?;
+                }
+                None => self.stash(offline),
+            }
+        }
+
+        self.socket = Box::new(up.tcp);
+        #[cfg(windows)]
+        {
+            self.wifi = up.wifi;
+        }
+        Ok(true)
+    }
+
+    /// As the receiver over Bluetooth, ask the phone to host Wi-Fi Direct (the
+    /// advertiser's role switch in Nearby's bwu_manager), then join its offer.
+    async fn try_wifi_upgrade(&mut self) -> Result<bool, anyhow::Error> {
+        use location_nearby_connections::bandwidth_upgrade_negotiation_frame::EventType;
+
+        self.encrypt_and_send(&super::bwu::path_request()).await?;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let offline = match tokio::time::timeout_at(deadline, self.read_encrypted_offline_frame()).await {
+                Err(_) => {
+                    info!("BWU: the phone offered no Wi-Fi network");
+                    return Ok(false);
+                }
+                Ok(f) => f?,
+            };
+            if offline.v1.as_ref().map(|v| v.r#type())
+                == Some(location_nearby_connections::v1_frame::FrameType::KeepAlive)
+            {
+                self.send_keepalive(true).await?;
+                continue;
+            }
+            let Some(bwu) = super::bwu::event(&offline) else {
+                self.stash(offline);
+                continue;
+            };
+            match bwu.event_type() {
+                EventType::UpgradePathAvailable => {
+                    let upi = bwu.upgrade_path_info.clone().unwrap_or_default();
+                    let eid = String::from_utf8_lossy(&self.endpoint_id).to_string();
+                    return match super::bwu::reach(&upi, &eid).await {
+                        Ok(up) => self.drain_and_swap(up).await,
+                        Err(e) => {
+                            warn!("BWU: can't use the phone's {:?}: {e}", upi.medium());
+                            let _ = self.encrypt_and_send(&super::bwu::failure(upi.medium)).await;
+                            Ok(false)
+                        }
+                    };
+                }
+                EventType::UpgradeFailure => return Ok(false),
+                other => debug!("BWU: waiting for an offer, got {other:?}"),
+            }
+        }
     }
 
     async fn disconnection(&mut self) -> Result<(), anyhow::Error> {

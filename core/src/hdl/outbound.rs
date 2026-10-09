@@ -238,24 +238,8 @@ impl OutboundRequest {
         // Windows is not implemented).
         let (mediums, medium_metadata) = if self.wifi_upgrade {
             (
-                vec![
-                    Medium::WifiLan.into(),
-                    Medium::WifiDirect.into(),
-                    Medium::WifiHotspot.into(),
-                    Medium::Bluetooth.into(),
-                ],
-                Some(location_nearby_connections::MediumMetadata {
-                    supports_5_ghz: Some(true),
-                    medium_role: Some(location_nearby_connections::MediumRole {
-                        support_wifi_direct_group_client: Some(true),
-                        support_wifi_hotspot_client: Some(true),
-                        ..Default::default()
-                    }),
-                    supported_wifi_direct_auth_types: vec![
-                        location_nearby_connections::medium_metadata::WifiDirectAuthType::WifiDirectWithPassword.into(),
-                    ],
-                    ..Default::default()
-                }),
+                [super::bwu::mediums(), vec![Medium::Bluetooth.into()]].concat(),
+                Some(super::bwu::client_metadata()),
             )
         } else {
             (vec![Medium::WifiLan.into()], None)
@@ -1014,45 +998,13 @@ impl OutboundRequest {
         Ok(())
     }
 
-    async fn read_encrypted_offline_frame(&mut self) -> Result<OfflineFrame, anyhow::Error> {
-        let mut len = [0u8; 4];
-        stream_read_exact(&mut self.socket, &mut len).await?;
-        let n = u32::from_be_bytes(len) as usize;
-        if n > SANE_FRAME_LENGTH as usize {
-            return Err(anyhow!("frame too long"));
-        }
-        let mut buf = vec![0u8; n];
-        stream_read_exact(&mut self.socket, &mut buf).await?;
-        self.decrypt_offline(&SecureMessage::decode(&*buf)?).await
-    }
-
-    fn bwu_frame(
-        event: location_nearby_connections::bandwidth_upgrade_negotiation_frame::EventType,
-        upgrade_path_info: Option<location_nearby_connections::bandwidth_upgrade_negotiation_frame::UpgradePathInfo>,
-        client_introduction: Option<location_nearby_connections::bandwidth_upgrade_negotiation_frame::ClientIntroduction>,
-    ) -> OfflineFrame {
-        OfflineFrame {
-            version: Some(location_nearby_connections::offline_frame::Version::V1.into()),
-            v1: Some(location_nearby_connections::V1Frame {
-                r#type: Some(location_nearby_connections::v1_frame::FrameType::BandwidthUpgradeNegotiation.into()),
-                bandwidth_upgrade_negotiation: Some(location_nearby_connections::BandwidthUpgradeNegotiationFrame {
-                    event_type: Some(event.into()),
-                    upgrade_path_info,
-                    client_introduction,
-                    ..Default::default()
-                }),
-                ..Default::default()
-            }),
-        }
-    }
-
     /// As the sender over Bluetooth, take the Wi-Fi network the phone offers:
     /// it hosts (Wi-Fi Direct group / hotspot, or its LAN address) and sends
     /// UPGRADE_PATH_AVAILABLE; we join, connect, introduce ourselves on the new
     /// channel and drain the old one. `Ok(true)` when the socket was swapped.
     /// Approach and frame sequence from open-quickshare (GPL-3.0).
     async fn try_wifi_upgrade(&mut self) -> Result<bool, anyhow::Error> {
-        use location_nearby_connections::bandwidth_upgrade_negotiation_frame::{EventType, UpgradePathInfo};
+        use location_nearby_connections::bandwidth_upgrade_negotiation_frame::EventType;
 
         let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
         loop {
@@ -1075,19 +1027,15 @@ impl OutboundRequest {
             match bwu.event_type() {
                 EventType::UpgradePathAvailable => {
                     let upi = bwu.upgrade_path_info.clone().unwrap_or_default();
-                    let medium = upi.medium();
-                    let tcp = match self.reach_offered_network(&upi).await {
-                        Ok(tcp) => tcp,
+                    let eid = String::from_utf8_lossy(&self.endpoint_id).to_string();
+                    return match super::bwu::reach(&upi, &eid).await {
+                        Ok(up) => self.drain_and_swap(up).await,
                         Err(e) => {
-                            warn!("BWU: can't use the phone's {medium:?}: {e}");
-                            let failure = UpgradePathInfo { medium: upi.medium, ..Default::default() };
-                            let _ = self
-                                .encrypt_and_send(&Self::bwu_frame(EventType::UpgradeFailure, Some(failure), None))
-                                .await;
-                            return Ok(false);
+                            warn!("BWU: can't use the phone's {:?}: {e}", upi.medium());
+                            let _ = self.encrypt_and_send(&super::bwu::failure(upi.medium)).await;
+                            Ok(false)
                         }
                     };
-                    return self.finish_upgrade_over(tcp).await;
                 }
                 EventType::UpgradePathRequest => {
                     info!("BWU: the phone asks us to host Wi-Fi, which is not supported");
@@ -1099,88 +1047,57 @@ impl OutboundRequest {
         }
     }
 
-    /// Joins the network named in the offer (when it is the phone's own) and
-    /// opens the TCP socket the phone listens on.
-    async fn reach_offered_network(
-        &mut self,
-        upi: &location_nearby_connections::bandwidth_upgrade_negotiation_frame::UpgradePathInfo,
-    ) -> Result<tokio::net::TcpStream, anyhow::Error> {
-        match upi.medium() {
-            Medium::WifiLan => {
-                let s = upi.wifi_lan_socket.as_ref().ok_or_else(|| anyhow!("no LAN socket"))?;
-                let ip: [u8; 4] = s.ip_address().try_into().map_err(|_| anyhow!("bad LAN address"))?;
-                let addr = std::net::Ipv4Addr::from(ip).to_string();
-                info!("BWU: phone offers its LAN address {addr}:{}", s.wifi_port());
-                Ok(tokio::net::TcpStream::connect((addr.as_str(), s.wifi_port() as u16)).await?)
-            }
-            #[cfg(windows)]
-            Medium::WifiDirect | Medium::WifiHotspot => {
-                let (ssid, password, gateway, port) = if let Some(c) = upi.wifi_direct_credentials.as_ref() {
-                    (c.ssid().to_owned(), c.password().to_owned(), c.gateway().to_owned(), c.port())
-                } else if let Some(c) = upi.wifi_hotspot_credentials.as_ref() {
-                    (c.ssid().to_owned(), c.password().to_owned(), c.gateway().to_owned(), c.port())
-                } else {
-                    return Err(anyhow!("offer without credentials"));
-                };
-                info!("BWU: phone hosts {:?} '{ssid}', gateway {gateway}:{port}; joining", upi.medium());
-                self.wifi = Some(super::wifi_join::join(&ssid, &password).await?);
-                super::wifi_join::connect_tcp(&gateway, port as u16).await
-            }
-            other => Err(anyhow!("unsupported medium {other:?}")),
+    async fn read_encrypted_offline_frame(&mut self) -> Result<OfflineFrame, anyhow::Error> {
+        let mut len = [0u8; 4];
+        stream_read_exact(&mut self.socket, &mut len).await?;
+        let n = u32::from_be_bytes(len) as usize;
+        if n > SANE_FRAME_LENGTH as usize {
+            return Err(anyhow!("frame too long"));
         }
+        let mut buf = vec![0u8; n];
+        stream_read_exact(&mut self.socket, &mut buf).await?;
+        self.decrypt_offline(&SecureMessage::decode(&*buf)?).await
     }
 
-    /// Introduces us on the new TCP channel, drains the Bluetooth channel with
-    /// LAST_WRITE / SAFE_TO_CLOSE, then swaps the socket. Encryption keys and
-    /// sequence numbers carry over unchanged.
-    async fn finish_upgrade_over(&mut self, mut tcp: tokio::net::TcpStream) -> Result<bool, anyhow::Error> {
-        use location_nearby_connections::bandwidth_upgrade_negotiation_frame::{ClientIntroduction, EventType};
+    /// The phone does not send anything but control frames while we upgrade.
+    fn stash(&mut self, offline: OfflineFrame) {
+        debug!("BWU: unexpected frame while upgrading: {:?}", offline.v1.as_ref().map(|v| v.r#type()));
+    }
 
-        let intro = Self::bwu_frame(
-            EventType::ClientIntroduction,
-            None,
-            Some(ClientIntroduction {
-                endpoint_id: Some(String::from_utf8_lossy(&self.endpoint_id).to_string()),
-                supports_disabling_encryption: Some(false),
-            }),
-        )
-        .encode_to_vec();
-        tcp.write_all(&(intro.len() as u32).to_be_bytes()).await?;
-        tcp.write_all(&intro).await?;
-        tcp.flush().await?;
-        // The ack is optional: read it if it comes, ignore its content.
-        let _ = tokio::time::timeout(Duration::from_secs(3), async {
-            let mut len = [0u8; 4];
-            stream_read_exact(&mut tcp, &mut len).await?;
-            let mut body = vec![0u8; (u32::from_be_bytes(len) as usize).min(SANE_FRAME_LENGTH as usize)];
-            stream_read_exact(&mut tcp, &mut body).await
-        })
-        .await;
+    /// Drains the Bluetooth channel with LAST_WRITE / SAFE_TO_CLOSE, then
+    /// swaps the socket. Encryption keys and sequence numbers carry over.
+    async fn drain_and_swap(&mut self, up: super::bwu::Upgraded) -> Result<bool, anyhow::Error> {
+        use location_nearby_connections::bandwidth_upgrade_negotiation_frame::EventType;
 
-        self.encrypt_and_send(&Self::bwu_frame(EventType::LastWriteToPriorChannel, None, None)).await?;
+        self.encrypt_and_send(&super::bwu::frame(EventType::LastWriteToPriorChannel, None, None)).await?;
         for _ in 0..16 {
             let Ok(Ok(offline)) =
                 tokio::time::timeout(Duration::from_secs(5), self.read_encrypted_offline_frame()).await
             else {
                 break;
             };
-            match offline
-                .v1
-                .as_ref()
-                .and_then(|v| v.bandwidth_upgrade_negotiation.as_ref())
-                .map(|b| b.event_type())
-            {
+            match super::bwu::event(&offline).map(|b| b.event_type()) {
                 Some(EventType::LastWriteToPriorChannel) => {
                     let _ = self
-                        .encrypt_and_send(&Self::bwu_frame(EventType::SafeToClosePriorChannel, None, None))
+                        .encrypt_and_send(&super::bwu::frame(EventType::SafeToClosePriorChannel, None, None))
                         .await;
                 }
                 Some(EventType::SafeToClosePriorChannel) => break,
-                other => debug!("BWU: draining Bluetooth channel, got {other:?}"),
+                Some(other) => debug!("BWU: draining Bluetooth channel, got {other:?}"),
+                None if offline.v1.as_ref().map(|v| v.r#type())
+                    == Some(location_nearby_connections::v1_frame::FrameType::KeepAlive) =>
+                {
+                    self.send_keepalive(true).await?;
+                }
+                None => self.stash(offline),
             }
         }
 
-        self.socket = Box::new(tcp);
+        self.socket = Box::new(up.tcp);
+        #[cfg(windows)]
+        {
+            self.wifi = up.wifi;
+        }
         Ok(true)
     }
 

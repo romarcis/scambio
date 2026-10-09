@@ -14,6 +14,7 @@ mod ble;
 pub use ble::*;
 #[cfg(windows)]
 pub mod ble_scan;
+pub(crate) mod bwu;
 #[cfg(windows)]
 pub mod rfcomm;
 #[cfg(windows)]

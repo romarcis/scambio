@@ -152,8 +152,9 @@ impl RQS {
                 let einfo = utils::endpoint_info(DeviceType::Laptop as u8, &utils::device_name());
                 let sd = hdl::receiver_service_data(endpoint_id[..4].try_into()?, &einfo, listener.mac);
                 let sender = self.message_sender.clone();
+                let eid: [u8; 4] = endpoint_id[..4].try_into()?;
                 listener.serve(
-                    move |stream, who| manager::spawn_inbound(Box::new(stream), who, sender.clone()),
+                    move |stream, who| manager::spawn_inbound(eid, Box::new(stream), who, sender.clone()),
                     ctoken.clone(),
                 );
                 match hdl::ReceiverAdvertiser::new(&sd) {
